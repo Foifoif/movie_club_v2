@@ -24,7 +24,7 @@ and on the findings of
 
 | Invariant | Mechanism | Where it runs |
 |---|---|---|
-| Another feature is imported only through its `index.ts` | ESLint `no-restricted-imports` | pre-commit, CI |
+| Another feature is imported only through its `index.ts` (alias imports; see the known gap) | ESLint `no-restricted-imports` | pre-commit, CI |
 | The Supabase client and generated DB types are imported only from `*.data.ts` | ESLint `no-restricted-imports` | pre-commit, CI |
 | Neither of the above can be switched off inline | `@eslint-community/eslint-plugin-eslint-comments` | pre-commit, CI |
 | `anon` holds no privileges in schema `v2` | pgTAP | CI |
@@ -103,6 +103,18 @@ keeps them). That is why the exempt block restates `featureBoundary` instead of
 listing only what it lifts. Any future restricted-import block must restate
 every pattern that still applies, or it silently switches the others off for
 those files.
+
+**Known gap, accepted.** `no-restricted-imports` matches the import *text*, not
+the file it resolves to. So inside `features/ratings`, a relative
+`'../movies/internal'` contains no `features/` and passes — a deep import into
+another feature slips through. The same text-matching is why a feature's
+imports of its own files must be relative: `@/features/ratings/…` from inside
+`ratings` would trip the rule, and the message says so. Closing the gap needs a
+resolver (`eslint-plugin-boundaries`), which is more machinery than this site
+needs; a `../<other-feature>/` path is easy to spot in review. Revisit if
+cross-feature deep imports actually start appearing. The data-layer rule has no
+such gap — its targets are distinctive enough that the regex catches any route
+to them.
 
 The exemption is a suffix plus **one named file**, never a directory: whether a
 file may touch the client is visible in its own name, and nothing can shelter
@@ -258,7 +270,9 @@ Each of these was considered as a check and left as prose, for the reason given.
   few rules — not worth it here.
 - **`eslint-plugin-boundaries`** and **`eslint-plugin-import-x`.** A
   dependency-matrix model and a resolver, where two patterns suffice;
-  boundaries' v7 has also just deprecated its classic rules.
+  boundaries' v7 has also just deprecated its classic rules. Boundaries is the
+  one that would close the feature rule's relative-import gap — the price was
+  judged too high for the gap.
 - **`linterOptions.noInlineConfig`.** Blocks every suppression in the repo, not
   just the architectural ones.
 - **Linting SQL migration files.** Squawk has no custom rules; SQLFluff needs a
