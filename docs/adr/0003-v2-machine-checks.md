@@ -26,8 +26,8 @@ and on the findings of
 |---|---|---|
 | Another feature is imported only through its `index.ts` | ESLint `no-restricted-imports` | pre-commit, CI |
 | The Supabase client and generated DB types are imported only from `*.data.ts` | ESLint `no-restricted-imports` | pre-commit, CI |
-| Neither of the above can be suppressed inline | `@eslint-community/eslint-plugin-eslint-comments` | pre-commit, CI |
-| `anon` holds zero privileges in schema `v2` | pgTAP | CI |
+| Neither of the above can be switched off inline | `@eslint-community/eslint-plugin-eslint-comments` | pre-commit, CI |
+| `anon` holds no privileges in schema `v2` | pgTAP | CI |
 | Every table in `v2` has RLS enabled | pgTAP | CI |
 | Every `auth.users` row has a `v2.members` row | pgTAP | CI |
 | Strict TypeScript | `tsc` | CI |
@@ -48,10 +48,9 @@ formats. The baseline is deliberately small:
 ESLint runs with **`--max-warnings 0`**. A warning nobody has to fix is a
 comment with a worse UI.
 
-No `eslint-plugin-boundaries`, no `eslint-plugin-import-x`. Both architectural
-rules ride on stock `no-restricted-imports`, which supports glob patterns and a
-custom message; TypeScript already catches unresolved imports; and an import
-resolver is config surface agents routinely get wrong.
+Both architectural rules ride on stock `no-restricted-imports`, which takes a
+glob or regex and a custom message. TypeScript already catches unresolved
+imports, and an import resolver is config surface agents routinely get wrong.
 
 ### The two boundary rules
 
@@ -72,7 +71,8 @@ const featureBoundary = {
 };
 
 const dataLayer = {
-  group: ['@supabase/supabase-js', '@/lib/supabase', '**/database.types'],
+  // A regex, not a glob, so a relative path to the client is caught too.
+  regex: '^@supabase/supabase-js(/|$)|(^|/)lib/supabase(/|$)|(^|/)database\\.types(/|$)',
   message:
     'Only `*.data.ts` may import the Supabase client or generated database types. ' +
     "Move this query into the feature's `*.data.ts` and import its TanStack Query hook instead — " +
@@ -88,7 +88,8 @@ export default [
     },
   },
   {
-    files: ['src/**/*.data.ts', 'src/lib/supabase/**'],
+    // *.data.ts, plus the one module that constructs the client.
+    files: ['src/**/*.data.ts', 'src/lib/supabase.ts'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [featureBoundary] }],
     },
@@ -96,47 +97,56 @@ export default [
 ];
 ```
 
-**Gotcha worth keeping:** in flat config, a later block that sets the same rule
-**replaces** its options rather than merging them. That is why the exempt block
-restates `featureBoundary` instead of listing only what it lifts. Any future
-restricted-import block must restate every pattern that still applies, or it
-silently switches the others off for those files.
+**Gotcha worth keeping:** in flat config, a later block that sets a rule's
+options **replaces** them rather than merging (a block setting only the severity
+keeps them). That is why the exempt block restates `featureBoundary` instead of
+listing only what it lifts. Any future restricted-import block must restate
+every pattern that still applies, or it silently switches the others off for
+those files.
+
+The exemption is a suffix plus **one named file**, never a directory: whether a
+file may touch the client is visible in its own name, and nothing can shelter
+under a `data/` or `supabase/` folder.
 
 The **feature-boundary message carries the promotion rule.** The rule itself
-can't be mechanised (see below), but the moment an agent reaches into another
-feature is exactly the moment it applies — so its trigger condition is stated
-in the one place an agent is guaranteed to read.
+can't be mechanised, but the moment an agent reaches into another feature is
+exactly the moment it applies — so its trigger is stated in the one place an
+agent is guaranteed to read.
 
-The data-layer rule restricts the generated types file as well as the client.
-That is the mechanical half of the vertical slice's first correction, where a
-generated row leaked `release_date` into a component: components can no longer
-*name* a row type. The other half — whether a given mapping still leaks database
-semantics — is judgment, and stays prose.
+The data-layer rule restricts the generated types as well as the client. That is
+the mechanical half of the vertical slice's first correction, where a generated
+row leaked `release_date` into a component: components can no longer *name* a
+row type. The other half stays prose.
 
-The suffix, rather than a `data/` directory, is deliberate: one glob, no
-`data/helpers.ts` sneaking under the exemption, and whether a file may touch the
-client is visible in its own name.
-
-### The architectural rules cannot be suppressed
+### The architectural rules cannot be switched off inline
 
 An agent that hits a failing rule has two moves: fix the code, or silence the
-rule. Silencing is always cheaper. For these two rules it is not available:
+rule. Silencing is always cheaper. For these rules it is not available:
 
 ```js
 rules: {
-  '@eslint-community/eslint-comments/no-restricted-disable': ['error', 'no-restricted-imports'],
-  '@eslint-community/eslint-comments/no-unlimited-disable': 'error',
+  // Disabling no-restricted-imports — or the rules guarding it — is refused.
+  // A bare `eslint-disable` names no rule and is refused too.
+  '@eslint-community/eslint-comments/no-restricted-disable': [
+    'error',
+    'no-restricted-imports',
+    '@eslint-community/eslint-comments/*',
+  ],
+  // `/* eslint no-restricted-imports: "off" */` is a config comment, not a
+  // disable, so it needs its own ban. Disable comments stay allowed.
+  '@eslint-community/eslint-comments/no-use': [
+    'error',
+    { allow: ['eslint-disable', 'eslint-disable-line', 'eslint-disable-next-line', 'eslint-enable'] },
+  ],
 },
 ```
 
-`no-unlimited-disable` closes the obvious bypass — a bare `/* eslint-disable */`
-names no rule at all. Everywhere else, suppressions remain available.
-
-The remaining way round is editing `eslint.config.js`. That is intended: it
-turns "silence the architecture" into a pull request a human reads.
+Every other rule can still be disabled by name. The only way round the
+architectural rules is editing `eslint.config.js`, which is intended: it turns
+"silence the architecture" into a pull request a human reads.
 
 Install the **scoped** `@eslint-community` package. The unscoped
-`eslint-plugin-eslint-comments` was last published in 2022.
+`eslint-plugin-eslint-comments` has not had a release since 2020.
 
 ## TypeScript
 
@@ -160,26 +170,36 @@ Supabase's documented path: SQL tests in `supabase/tests/database/`, run by
 These three are catalog queries, so they cover **tables that don't exist yet**
 — which is why ADR-0002 rated them above the rest of the RLS suite.
 
-Each description is written as a fix instruction, because pgTAP prints it on
-failure:
+pgTAP prints a test's description on failure, so each description carries the
+fix:
 
-1. **`anon has zero privileges on schema v2`** — *ADR-0002 revokes `anon`
+1. **`anon has no privileges in schema v2`** — *ADR-0002 revokes `anon`
    deliberately. Supabase's custom-schema doc prints `grant all ... to anon`;
    do not paste it. Policies are the second layer, not the first.*
-   `schema_privs_are('v2', 'anon', array[]::text[])` covers the schema itself.
-   Tables, sequences and routines need a catalog query too, because a stray
-   object grant is harmless only for as long as schema `usage` stays revoked.
-   Whoever writes it must decide how to treat `PUBLIC`: new functions carry
-   `EXECUTE` to `PUBLIC` by default, which `anon` inherits, and ADR-0002 only
-   revokes that on `v2.is_admin()`.
-2. **`every table in schema v2 has row level security enabled`** — not stock
-   pgTAP. Use Supabase's `tests.rls_enabled()` helper, or the equivalent
-   one-line check over `pg_class.relrowsecurity`.
-3. **`every auth.users row has a matching v2.members row`** — *the trigger on
-   `auth.users` is the only door into `members`.*
+   Two parts: `schema_privs_are('v2', 'anon', array[]::text[], …)` pins the
+   schema itself, and a catalog query asserts no table, sequence or routine in
+   `v2` carries a grant **made to `anon`**.
 
-The rest of ADR-0002's behavioural suite (per-role reads and writes, admission,
-self-promotion) lives alongside these and is not restated here.
+   > _Narrows ADR-0002's wording_ — "zero privileges on every object in schema
+   > `v2`" — because read literally, ADR-0002's own migration fails it:
+   > Postgres grants `EXECUTE` on every new function to `PUBLIC`, which `anon`
+   > inherits, and ADR-0002 revokes that only on `v2.is_admin()`, leaving
+   > `v2.handle_new_auth_user()` executable. Inherited `PUBLIC` execute is
+   > unreachable while schema `usage` stays revoked — which part one pins — so
+   > the check counts direct grants only.
+
+2. **`every table in schema v2 has row level security enabled`** — *add
+   `enable row level security` in the migration that creates the table. Without
+   it, every member can read and write every row whatever the policies say.*
+   Either basejump's `supabase_test_helpers` (installed via dbdev), which
+   provides `tests.rls_enabled()`, or the equivalent one-line check over
+   `pg_class.relrowsecurity` with no dependency.
+3. **`every auth.users row has a matching v2.members row`** — *the trigger on
+   `auth.users` is the only door into `members`; do not insert members
+   directly.*
+
+The rest of ADR-0002's behavioural suite lives alongside these and is not
+restated here.
 
 Because the database is local and ephemeral, **this suite needs no Supabase
 credentials** in CI.
@@ -196,34 +216,32 @@ npm run check  =  tsr generate  →  tsc --noEmit  →  eslint --max-warnings 0 
   files only*. It is kept fast on purpose — a slow hook gets bypassed with
   `--no-verify`, and agents reach for that flag readily.
 - **CI** runs `npm run check`, and separately `supabase db start` →
-  `supabase test db`. Nobody has Docker locally, so the database suite is
-  CI-only by necessity.
+  `supabase test db`. The database suite is CI-only: nobody runs Docker locally
+  (see the map's settled local-dev decision).
 - **The TanStack router packages are pinned to exact versions** — the router,
   its Vite plugin and its CLI. They version independently, and a mismatch
   breaks generation. Don't caret-range them back.
 
 ## Deliberately not mechanised
 
-Each of these was considered and rejected as a check, because it is judgment
-wearing a lint rule's clothes.
+Each of these was considered as a check and left as prose, for the reason given.
 
-- **No raw colour values.** Tokens are the convention (see
-  [the design-tokens prototype](https://github.com/a-movie-club/movie_club_v2/issues/11)).
-  No single tool covers both `.tsx` source and CSS; `no-restricted-syntax` needs
-  three selectors and still misses assembled strings; shadcn/ui's own repo
-  enforces nothing here. Not worth the cost on a hobby site.
-- **Nothing but `movies` carries a film's title, year or poster.** The invariant
-  stands (ADR-0001, `CONTEXT.md`). A check would have to guess at column names —
-  `film_name` and `poster_path` slip through, and a legitimate raw-title column
-  in some future import log would trip it. It was known to be problematic, so
-  it was let go.
-- **Whether a mapping leaks database semantics.** The mechanical half is
-  enforced above. "A `Pick<Row>` is fine when no naming or semantics leak" is a
-  review question.
-- **The promotion rule** — shared code only on the second consumer, never in
-  anticipation. No linter can see anticipation. Its trigger is stated in the
-  feature-boundary message.
-- **The exact directory shape of a feature.** Folder conventions defines it.
+- **No raw colour values** — *not worth the cost.* Tokens remain the convention
+  (see [the design-tokens prototype](https://github.com/a-movie-club/movie_club_v2/issues/11)).
+  No single tool covers both `.tsx` source and CSS, `no-restricted-syntax` needs
+  three selectors and still misses assembled strings, and shadcn/ui's own repo
+  enforces nothing here. Too much machinery for a hobby site.
+- **Nothing but `movies` carries a film's title, year or poster** — *too
+  imprecise.* The invariant stands (ADR-0001, `CONTEXT.md`). A check would have
+  to guess at column names: `film_name` and `poster_path` slip through, and a
+  legitimate raw-title column in some future import log would trip it.
+- **Whether a mapping leaks database semantics** — *judgment.* The mechanical
+  half is enforced above. "A `Pick<Row>` is fine when no naming or semantics
+  leak" is a review question.
+- **The promotion rule** — *judgment.* No linter can see anticipation; its
+  trigger is carried by the feature-boundary message.
+- **The exact directory shape of a feature** — *not this ADR's.* Folder
+  conventions defines it.
 
 ## Considered options
 
@@ -238,18 +256,17 @@ wearing a lint rule's clothes.
   Lint time becomes roughly build time, and `recommendedTypeChecked` fires
   constantly on ordinary agent code. Rejected entirely rather than trimmed to a
   few rules — not worth it here.
-- **`eslint-plugin-boundaries`.** An element-type/dependency-matrix model is
-  heavier than two glob patterns, and its v7 has just deprecated its classic
-  rules.
-- **`--no-inline-config`.** Blocks every suppression in the repo, not just the
-  architectural ones.
+- **`eslint-plugin-boundaries`** and **`eslint-plugin-import-x`.** A
+  dependency-matrix model and a resolver, where two patterns suffice;
+  boundaries' v7 has also just deprecated its classic rules.
+- **`linterOptions.noInlineConfig`.** Blocks every suppression in the repo, not
+  just the architectural ones.
 - **Linting SQL migration files.** Squawk has no custom rules; SQLFluff needs a
   shipped Python plugin. Nothing left in the inventory needs either — database
   facts are asserted against the database.
 - **Vitest + node-postgres** for the database assertions. Agents write better
   Vitest than pgTAP, but these are catalog queries, SQL either way, and
   `supabase test db` supplies the plumbing for free.
-- **Running the full gate pre-commit.** See The gate.
 
 ## Consequences
 
@@ -259,6 +276,4 @@ wearing a lint rule's clothes.
   unreachable from other features by construction.
 - **Loosening a boundary rule is a config change in a reviewed PR**, never an
   inline comment. That is the intended friction.
-- **Two invariants live in the database rather than here.** `rated_at`
-  immutability and `updated_at` are triggers (ADR-0002); a lint rule cannot see
-  an edit made through the dashboard or `psql`.
+- **`rated_at` needs no lint rule** — ADR-0002 made it a trigger.
